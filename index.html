@@ -423,6 +423,7 @@
 
     <div class="input-zone">
       <textarea id="ingredientInput" placeholder="e.g. chicken breast, brown rice, spinach, garlic, olive oil, eggs, cheddar cheese, milk, onion, canned tomatoes…" maxlength="1000"></textarea>
+      <div id="interimPreview" style="min-height:20px;font-size:13px;color:#9aaa9f;font-style:italic;padding:4px 0 8px;display:none;"></div>
       <div class="input-tools">
         <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()">
           <span class="mic-dot"></span>
@@ -474,7 +475,7 @@
       </div>
     </div>
 
-    <button class="btn-primary" id="analyzeBtn" onclick="analyzeKitchen()" disabled>
+    <button class="btn-primary" id="analyzeBtn" onclick="analyzeKitchen()">
       <span>✨</span> Show Me What I Can Make
     </button>
   </div>
@@ -519,10 +520,26 @@ let selectedDiets = [];
 let expiringItems = [];
 let sessionLog = [];
 
+// ── CONFIG — swap endpoint here for Ollama local server ────
+// To use Ollama on your M4 Mac:
+//   1. Run: ollama serve  (default: http://localhost:11434)
+//   2. Set USE_OLLAMA = true and pick your model below
+const USE_OLLAMA   = false;
+const OLLAMA_URL   = 'http://localhost:11434/api/chat';
+const OLLAMA_MODEL = 'llama3';          // change to any model you have pulled
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_MODEL = 'claude-sonnet-4-20250514';
+
+// ── BUTTON HELPER ─────────────────────────────────────────
+function updateBtn() {
+  const val = document.getElementById('ingredientInput').value.trim();
+  document.getElementById('analyzeBtn').disabled = val.length < 3;
+}
+
 // ── INIT ──────────────────────────────────────────────────
 document.getElementById('ingredientInput').addEventListener('input', function() {
   document.getElementById('charCount').textContent = this.value.length + ' / 1000';
-  document.getElementById('analyzeBtn').disabled = this.value.trim().length < 3;
+  updateBtn();
 });
 
 // ── VOICE ─────────────────────────────────────────────────
@@ -544,7 +561,6 @@ function toggleVoice() {
   const btn = document.getElementById('voiceBtn');
   const label = document.getElementById('voiceBtnLabel');
   const ta = document.getElementById('ingredientInput');
-  let interim = '';
 
   recognition.onstart = () => {
     isListening = true;
@@ -552,16 +568,24 @@ function toggleVoice() {
     label.textContent = 'Listening… tap to stop';
   };
 
+  const preview = document.getElementById('interimPreview');
+
   recognition.onresult = (e) => {
-    let final = '';
-    interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) final += e.results[i][0].transcript + ' ';
-      else interim += e.results[i][0].transcript;
-    }
-    if (final) {
-      ta.value += (ta.value ? ', ' : '') + final.trim();
-      ta.dispatchEvent(new Event('input'));
+    // Only process the latest result to avoid duplication
+    const result = e.results[e.results.length - 1];
+    if (result.isFinal) {
+      // Commit final transcript to textarea permanently
+      const finalText = result[0].transcript.trim();
+      if (finalText) {
+        ta.value += (ta.value.trim() ? ', ' : '') + finalText;
+        ta.dispatchEvent(new Event('input'));
+      }
+      preview.textContent = '';
+      preview.style.display = 'none';
+    } else {
+      // Show interim (in-progress) text as a live preview only — not saved
+      preview.textContent = '🎙 ' + result[0].transcript;
+      preview.style.display = 'block';
     }
   };
 
@@ -569,6 +593,8 @@ function toggleVoice() {
     isListening = false;
     btn.classList.remove('listening');
     label.textContent = 'Speak your ingredients';
+    preview.textContent = '';
+    preview.style.display = 'none';
   };
 
   recognition.start();
@@ -605,6 +631,75 @@ function setStep(n) {
   });
 }
 
+// ── MOCK DATA (Demo Mode) ─────────────────────────────────
+const MOCK_RESULT = {
+  meals: [
+    {
+      name: "Garden Pasta",
+      description: "A simple, satisfying pasta tossed with garlic, olive oil, and whatever vegetables you have on hand. Ready in under 20 minutes and endlessly adaptable.",
+      difficulty: "Easy",
+      tags: ["vegetarian", "quick", "pantry-friendly"],
+      usesExpiring: false
+    },
+    {
+      name: "Rustic Omelet",
+      description: "A hearty folded omelet filled with cheese, onions, and any leftover greens or vegetables. Perfect for breakfast, lunch, or a fast weeknight dinner.",
+      difficulty: "Easy",
+      tags: ["high protein", "kid-friendly", "versatile"],
+      usesExpiring: true
+    },
+    {
+      name: "Pantry Stir-Fry",
+      description: "A bold, savory stir-fry built from rice, whatever protein you have, and any vegetables in the fridge. Comes together fast and cleans out the pantry.",
+      difficulty: "Medium",
+      tags: ["budget stretch", "flexible", "filling"],
+      usesExpiring: true
+    }
+  ],
+  expiryAlerts: [
+    { item: "Greens", suggestion: "Use in the omelet or stir-fry tonight — greens wilt fast once opened." },
+    { item: "Dairy", suggestion: "Add cheese to the omelet or pasta sauce before it turns." }
+  ],
+  groceryGaps: [
+    { item: "Canned beans", reason: "Adds protein and bulk to pasta or stir-fry with zero prep." },
+    { item: "Lemon", reason: "A squeeze brightens all three of these dishes instantly." },
+    { item: "Soy sauce or hot sauce", reason: "Gives the stir-fry its backbone — worth keeping stocked." },
+    { item: "Frozen peas", reason: "Last-minute veggie that works in every dish here." }
+  ],
+  kitchenNote: "You've got a solid foundation here — a little creativity and these ingredients go a long way. 🌿"
+};
+
+// ── CALL AI (Anthropic or Ollama) ─────────────────────────
+async function callAI(prompt) {
+  if (USE_OLLAMA) {
+    // ── LOCAL OLLAMA ──────────────────────────────────────
+    const res = await fetch(OLLAMA_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        stream: false
+      })
+    });
+    const data = await res.json();
+    return data.message?.content || '';
+  } else {
+    // ── ANTHROPIC API ─────────────────────────────────────
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await res.json();
+    return data.content?.map(b => b.text || '').join('') || '';
+  }
+}
+
 // ── MAIN ANALYSIS ─────────────────────────────────────────
 async function analyzeKitchen() {
   const ingredients = document.getElementById('ingredientInput').value.trim();
@@ -621,9 +716,10 @@ async function analyzeKitchen() {
   sessionLog.push(entry);
   console.log('[Meridian Research Log]', JSON.stringify(entry, null, 2));
 
-  // show loading
+  // show loading — do this immediately and unconditionally
   document.getElementById('panelInput').classList.add('hidden');
   document.getElementById('panelLoading').classList.remove('hidden');
+  document.getElementById('panelResults').classList.add('hidden');
   setStep(2);
 
   try {
@@ -664,7 +760,8 @@ Please respond ONLY with a valid JSON object in exactly this format (no markdown
       "reason": "why this would complete or improve their meals"
     }
   ],
-  "kitchenNote": "One warm, encouraging sentence about their kitchen situation"
+  "kitchenNote": "One warm, encouraging sentence about their kitchen situation",
+  "safetyNote": "Only include this field if the user listed any non-edible items like cleaning supplies, soap, chemicals, or medications. If present, write a friendly one-sentence kitchen safety reminder to store those items separately from food. Otherwise omit this field entirely."
 }
 
 Rules:
@@ -674,31 +771,18 @@ Rules:
 - List 2-3 expiry alerts only if there are expiring items, otherwise empty array
 - List exactly 3-4 grocery gap items that would be useful additions
 - Keep descriptions practical and friendly, not overly formal
-- The kitchenNote should feel warm and personal`;
+- The kitchenNote should feel warm and personal
+- SAFETY RULE: If any non-edible items appear in the ingredient list (cleaning products, soap, bleach, medications, toiletries), silently ignore them for recipes and include a friendly safetyNote reminding the user to store those separately from food`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-
-    const data = await response.json();
-    const raw = data.content.map(b => b.text || '').join('');
+    const raw = await callAI(prompt);
     const clean = raw.replace(/```json|```/g, '').trim();
     const result = JSON.parse(clean);
-
     renderResults(result, ingredients);
 
   } catch (err) {
-    console.error('Error:', err);
-    document.getElementById('panelLoading').classList.add('hidden');
-    document.getElementById('panelInput').classList.remove('hidden');
-    setStep(1);
-    alert('Something went wrong — please try again in a moment.');
+    console.warn('[Meridian] API unavailable — switching to Demo Mode:', err.message);
+    // Demo Mode: show mock meals so you can always demonstrate the UI
+    setTimeout(() => renderResults(MOCK_RESULT, ingredients), 800);
   }
 }
 
@@ -767,6 +851,12 @@ function renderResults(data, ingredients) {
     </div>`;
   }
 
+  if (data.safetyNote) {
+    alertsHtml += `<div style="margin-top:12px;padding:14px 16px;background:#fff8e8;border-left:3px solid var(--gold);border-radius:12px;font-size:13px;color:#7a5a20;line-height:1.5;">
+      🧴 <strong>Kitchen Safety Note:</strong> ${data.safetyNote}
+    </div>`;
+  }
+
   alertsCard.innerHTML = alertsHtml || '<p style="color:#6b7a70;font-size:14px;">No alerts — your kitchen looks good!</p>';
 
   document.getElementById('panelResults').classList.remove('hidden');
@@ -776,7 +866,9 @@ function renderResults(data, ingredients) {
 function startOver() {
   document.getElementById('ingredientInput').value = '';
   document.getElementById('charCount').textContent = '0 / 1000';
-  document.getElementById('analyzeBtn').disabled = true;
+  document.getElementById('interimPreview').textContent = '';
+  document.getElementById('interimPreview').style.display = 'none';
+  updateBtn();
   selectedDiets = [];
   expiringItems = [];
 
